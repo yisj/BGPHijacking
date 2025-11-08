@@ -16,9 +16,11 @@ from typing import Tuple, List
 # 셸 실행 유틸
 # ------------------------------
 def run_local(cmd: str, capture: bool = True) -> Tuple[int, str, str]:
-    """호스트 셸에서 명령 실행"""
+    """호스트 셸에서 명령 실행 (디코딩 오류 안전 처리)"""
     if capture:
-        proc = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+        # text=True + errors='replace'로 디코딩 에러를 안전하게 처리합니다.
+        # (바이트 출력에 비UTF-8 문자가 있어도 예외가 나지 않습니다.)
+        proc = subprocess.run(cmd, shell=True, capture_output=True, text=True, errors='replace')
         return proc.returncode, proc.stdout.strip(), proc.stderr.strip()
     else:
         rc = subprocess.call(cmd, shell=True)
@@ -83,28 +85,47 @@ def check_r6_status() -> None:
     print_block("R6: FRR 프로세스", out or err)
 
 
+def _run_vtysh_or_netcat(node: str, vty_cmd: str) -> Tuple[int, str, str]:
+    """
+    vtysh가 있으면 vtysh -c로 실행, 실패 시 로컬 VTY 포트(127.0.0.1:2605)에 netcat으로 연결 시도.
+    netcat 사용 시 텔넷 협상 바이트가 섞이지 않도록 nc -N(가능하면) 또는 -w/-q 옵션으로 안전히 닫음.
+    """
+    # 우선 vtysh -c 시도
+    rc, out, err = run_node(node, f'vtysh -c {shlex.quote(vty_cmd)} || true')
+    if out.strip():
+        return rc, out, err
+
+    # vtysh 실패 → netcat 시도 (비인터랙티브)
+    # printf로 명령 전달하고 연결 닫기
+    # try -N first (OpenBSD netcat), fall back to -w1 -q 0 (GNU busybox style)
+    nc_cmds = [
+        f"printf {shlex.quote(vty_cmd + '\\nexit\\n')} | nc -w1 -N 127.0.0.1 2605 || true",
+        f"printf {shlex.quote(vty_cmd + '\\nexit\\n')} | nc -w1 -q 0 127.0.0.1 2605 || true"
+    ]
+    for nc in nc_cmds:
+        rc2, out2, err2 = run_node(node, nc)
+        if out2.strip():
+            return rc2, out2, err2
+
+    # 모두 실패하면 빈 문자열과 마지막 err 반환
+    return rc, out, err
+
 def bgp_summary(nodes: List[str]) -> None:
     """
-    각 노드의 bgpd VTY(127.0.0.1:2605)에 직접 붙어서 'show ip bgp summary'를 조회.
-    vtysh 교차-첨부 문제를 피하기 위해 nc를 사용하고, 실패 시 로그로 폴백합니다.
+    각 노드에서 'show ip bgp summary' 를 실행해서 출력 획득.
+    vtysh 우선 → netcat 폴백 → 로그 tail 폴백
     """
     for n in nodes:
         title = f"{n}: show ip bgp summary"
-        # BusyBox nc 또는 netcat이 있을 때:
-        cmd = "printf 'show ip bgp summary\\nexit\\n' | nc -w1 127.0.0.1 2605 || true"
-        rc, out, err = run_node(n, cmd)
+        rc, out, err = _run_vtysh_or_netcat(n, "show ip bgp summary")
         if out.strip():
             print_block(title, out)
         else:
-            # telnet 폴백(환경에 따라 필요)
-            rc2, out2, err2 = run_node(n, "printf 'show ip bgp summary\\nexit\\n' | telnet 127.0.0.1 2605 2>/dev/null || true")
-            if out2.strip():
-                print_block(title, out2)
-            else:
-                # 로그 폴백
-                rc3, out3, err3 = run_node(n, f"tail -n 40 /tmp/{n}-bgpd.log || true")
-                msg = out3 if out3 else (err or err2 or "(vty 출력/로그 모두 없음)")
-                print_block(f"{title} (fallback: tail bgpd.log)", msg)
+            # 마지막 폴백: 로그로 확인
+            rc2, out2, err2 = run_node(n, f"tail -n 40 /tmp/{n}-bgpd.log || true")
+            msg = out2 if out2 else (err or err2 or "(vtysh 출력/로그 모두 없음)")
+            print_block(f"{title} (fallback: tail bgpd.log)", msg)
+
 
 
 def http_probe(node: str, target_ip: str = "11.0.1.1", timeout: int = 4) -> str:
@@ -190,7 +211,7 @@ def verify_start_rogue() -> int:
     established_all = True
     wants = [("R3", "9.0.7.2"), ("R5", "9.0.8.2")]
     for n, nei in wants:
-        rc, out, err = run_node(n, "vtysh -c 'show ip bgp summary' || true")
+        rc, out, err = _run_vtysh_or_netcat(n, "show ip bgp summary")
         print_block(f"{n}: show ip bgp summary", out or err)
         line = ""
         for l in (out or "").splitlines():
