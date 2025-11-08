@@ -69,9 +69,17 @@ def main():
     cmd = ' '.join(FLAGS.cmd)
 
     # Sanity check: hostname inside that namespace
-    sanity = subprocess.run(["mnexec", "-a", pid, "hostname"], capture_output=True, text=True)
-    if sanity.stdout.strip() and sanity.stdout.strip() != FLAGS.node:
-        print(f"[경고] 요청 노드 '{FLAGS.node}' vs 실제 hostname '{sanity.stdout.strip()}'", file=sys.stderr)
+    # Run mnexec to get hostname, but treat 'mininet' as acceptable (common default).
+    try:
+        sanity = subprocess.run(["mnexec", "-a", pid, "hostname"], capture_output=True, text=True, timeout=1)
+        hn = sanity.stdout.strip()
+    except Exception:
+        hn = ""
+
+    # Many Mininet setups leave the namespace hostname as 'mininet'.
+    # Only warn if hostname is present and clearly different from requested node.
+    if hn and hn not in (FLAGS.node, "mininet"):
+        print(f"[경고] 요청 노드 '{FLAGS.node}' vs 실제 hostname '{hn}'", file=sys.stderr)
 
     # Very important: run through a shell to keep pipes/quotes/redirs intact
     os.execvp("mnexec", ["mnexec", "-a", pid, "/bin/sh", "-lc", cmd])

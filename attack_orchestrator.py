@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
 # attack_orchestrator.py
+# BGP Hijacking 오케스트레이터 (검증/관찰/하드모드 전환 지원)
+# - start_rogue.sh 성공 판정(--verify-start)
+# - BGP 피어/포트/데이터 평면까지 종합 확인
+# - hostname이 'mininet'으로 고정되는 환경 허용
+
 import argparse
 import shlex
 import subprocess
@@ -8,9 +13,10 @@ import time
 from typing import Tuple, List
 
 # ------------------------------
-# 런너 유틸
+# 셸 실행 유틸
 # ------------------------------
 def run_local(cmd: str, capture: bool = True) -> Tuple[int, str, str]:
+    """호스트 셸에서 명령 실행"""
     if capture:
         proc = subprocess.run(cmd, shell=True, capture_output=True, text=True)
         return proc.returncode, proc.stdout.strip(), proc.stderr.strip()
@@ -19,18 +25,22 @@ def run_local(cmd: str, capture: bool = True) -> Tuple[int, str, str]:
         return rc, "", ""
 
 def run_node_raw(node: str, cmd: str) -> Tuple[int, str, str]:
-    """sudo python3 run.py --node <node> --cmd "<cmd>" 호출"""
+    """sudo python3 run.py --node <node> --cmd "<cmd>" 호출 (원형)"""
     quoted = shlex.quote(cmd)
     full = f"sudo python3 run.py --node {shlex.quote(node)} --cmd {quoted}"
     return run_local(full, capture=True)
 
 def run_node(node: str, cmd: str) -> Tuple[int, str, str]:
     """
-    호스트네임을 먼저 확인해 run.py 매핑 오류를 조기에 탐지.
+    run.py 네임스페이스 매핑 조기 점검:
+    - 많은 환경에서 hostname이 'mininet'으로 고정 → 허용
+    - 그 외 불일치만 경고
     """
     rc_h, out_h, _ = run_node_raw(node, "hostname || true")
-    if out_h and out_h.strip() != node:
-        print(f"[경고] run.py가 '{node}' 대신 '{out_h.strip()}' 네임스페이스에 붙었습니다. run.py를 교체하세요.", file=sys.stderr)
+    if out_h:
+        hn = out_h.strip()
+        if hn not in (node, "mininet"):
+            print(f"[경고] run.py가 '{node}' 대신 '{hn}' 네임스페이스에 붙은 것 같습니다.", file=sys.stderr)
     return run_node_raw(node, cmd)
 
 def print_header(title: str):
@@ -106,7 +116,8 @@ def switch_to_hard_mode() -> None:
         "R6",
         "/usr/lib/frr/bgpd -f conf/bgpd-R6-hard.conf -d -i /tmp/bgpd-R6.pid > logs/R6-bgpd-hard-stdout 2>&1"
     )
-    if err: print(err)
+    if err:
+        print(err)
 
 def tail_logs(nodes: List[str], lines: int = 30):
     for n in nodes:
@@ -114,19 +125,104 @@ def tail_logs(nodes: List[str], lines: int = 30):
         print_block(f"{n}: bgpd 로그 tail (-{lines})", out or err)
 
 # ------------------------------
+# start_rogue.sh 성공 판정
+# ------------------------------
+def _peer_line_ok(line: str) -> bool:
+    """
+    'show ip bgp summary'의 피어 라인에서 Established/PfxRcd≥1 여부를 판단.
+    - 'Estab' 또는 'Established' 포함 → OK
+    - 마지막 토큰이 정수이고 >= 1 → OK
+    """
+    s = line.strip()
+    if not s:
+        return False
+    if "Estab" in s or "Established" in s:
+        return True
+    toks = s.split()
+    if toks:
+        try:
+            last = int(toks[-1])
+            if last >= 1:
+                return True
+        except ValueError:
+            pass
+    return False
+
+def verify_start_rogue() -> int:
+    """start_rogue.sh 성공 여부를 종합 판정.
+    반환값: 0(성공), 1(실패)
+    """
+    ok = True
+
+    print_header("[검증] 1) R6에서 bgpd/zebra가 올바른 conf로 기동?")
+    rc, out, err = run_node("R6", "ps -eo pid,cmd | egrep '/usr/lib/frr/(bgpd|zebra).*conf/(bgpd|zebra)-R6\\.conf' || true")
+    if not out.strip():
+        # conf 경로가 보이지 않으면 완화된 검사로 재확인
+        rc2, out2, err2 = run_node("R6", "ps -eo pid,cmd | egrep '/usr/lib/frr/(bgpd|zebra)' || true")
+        print(out2 or err2 or "(없음)")
+        print("  → R6 데몬이 기대한 conf로 뜨는지 확신할 수 없습니다.")
+        ok = False
+    else:
+        print(out)
+
+    print_header("[검증] 2) R6의 TCP/179 리스너 존재?")
+    rc, out, err = run_node("R6", "ss -tnlp | grep ':179 ' || true")
+    print(out or err or "(없음)")
+    if not out.strip():
+        print("  → R6에서 179 리스너가 확인되지 않았습니다.")
+        ok = False
+
+    print_header("[검증] 3) R3/R5에서 R6과 BGP Established + PfxRcd≥1?")
+    established_all = True
+    wants = [("R3", "9.0.7.2"), ("R5", "9.0.8.2")]
+    for n, nei in wants:
+        rc, out, err = run_node(n, "vtysh -c 'show ip bgp summary' || true")
+        print_block(f"{n}: show ip bgp summary", out or err)
+        line = ""
+        for l in (out or "").splitlines():
+            if l.strip().startswith(nei):
+                line = l
+                break
+        if not line or not _peer_line_ok(line):
+            established_all = False
+    if not established_all:
+        print("  → R3/R5 중 최소 하나에서 R6 피어가 Established/PfxRcd≥1 상태가 아닙니다.")
+        ok = False
+
+    print_header("[검증] 4) 데이터 평면: h5-1 → 11.0.1.1 응답이 공격자 배너인가?")
+    body = http_probe("h5-1", target_ip="11.0.1.1", timeout=3)
+    print(body or "(응답 없음)")
+    if "*** Attacker web server (AS6) ***" not in body:
+        print("  → 아직 하이재킹 응답이 아닙니다(수렴 대기 필요 또는 실패).")
+        ok = False
+
+    print_header("[검증] 판정")
+    print("결과:", "성공 ✅" if ok else "실패 ❌")
+    return 0 if ok else 1
+
+# ------------------------------
 # 메인
 # ------------------------------
 def main():
     ap = argparse.ArgumentParser(description="BGP Hijacking Orchestrator (Steps 2~6)")
     ap.add_argument("--hard", action="store_true", help="고급(전역) 공격까지 수행")
-    ap.add_argument("--only-hard", dest="only_hard", action="store_true", help="바로 hard 모드만 수행(기본 데몬/웹서버 기동 포함)")
+    ap.add_argument("--only-hard", dest="only_hard", action="store_true",
+                    help="바로 hard 모드만 수행(기본 데몬/웹서버 기동 포함)")
     ap.add_argument("--no-start", action="store_true", help="데몬/웹서버 기동 생략 (점검만)")
     ap.add_argument("--wait", type=int, default=10, help="BGP 수렴 대기 시간(초, 기본 10)")
+    ap.add_argument("--verify-start", action="store_true",
+                    help="start_rogue.sh 성공 여부만 검증하고 종료")
     args = ap.parse_args()
 
     print_header("전제: Mininet 토폴로지가 이미 올라와 있어야 합니다 (start_topology.py 실행).")
     print("※ 본 스크립트는 'run.py'를 sudo로 호출합니다. 비밀번호가 필요할 수 있습니다.\n")
 
+    # 단독 검증 모드: start_rogue.sh 실행 후 성공 여부만 확인하고 종료
+    if args.verify_start:
+        time.sleep(max(1, args.wait))  # 피어 수립/수렴 대기
+        sys.exit(verify_start_rogue())
+
+    # 일반 모드: (필요 시) 공격자 프로세스 기동 → 상태/요약/HTTP 체크 → (옵션) 하드모드 → 로그
     if not args.no_start:
         start_attacker_processes()
     elif not args.only_hard:
