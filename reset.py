@@ -50,8 +50,9 @@ def main():
         title("BGP Hijacking Lab — RESET")
 
         log(1, 5, "Kill FRR daemons (bgpd/zebra) & webservers")
-        run("sudo pkill -9 bgpd  >/dev/null 2>&1 || true")
-        run("sudo pkill -9 zebra >/dev/null 2>&1 || true")
+        run("sudo pkill -9 watchfrr >/dev/null 2>&1 || true")
+        run("sudo pkill -9 bgpd     >/dev/null 2>&1 || true")
+        run("sudo pkill -9 zebra    >/dev/null 2>&1 || true")
         run("sudo pkill -9 -f webserver.py >/dev/null 2>&1 || true")
 
         log(2, 5, "Clean Mininet (mn -c)")
