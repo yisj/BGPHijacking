@@ -1,168 +1,112 @@
 #!/usr/bin/env python
-# Copyright 2021-2024
-# Georgia Tech
-# All rights reserved
-# Do not post or publish in any public or forbidden forums or websites
-
 from mininet.topo import Topo
 from mininet.net import Mininet
-from mininet.log import lg, info, setLogLevel
-from mininet.util import dumpNodeConnections, quietRun, moveIntf
+from mininet.log import setLogLevel
 from mininet.cli import CLI
-from mininet.node import Switch, OVSKernelSwitch
-
-from subprocess import Popen, PIPE, check_output
-from time import sleep, time
-from multiprocessing import Process
+from time import sleep
 from argparse import ArgumentParser
-
-import sys
-import os
-import termcolor as T
-import time
+import os, termcolor as T
 
 setLogLevel('info')
-
-parser = ArgumentParser("Configure simple BGP network in Mininet.")
+parser = ArgumentParser("BGP Hijacking Fig.2 Topology")
 parser.add_argument('--rogue', action="store_true", default=False)
 parser.add_argument('--scriptfile', default=None)
 parser.add_argument('--sleep', default=3, type=int)
 args = parser.parse_args()
 
 FLAGS_rogue_as = args.rogue
-ROGUE_AS_NAME = 'R4'
+ROGUE_AS_NAME = 'R6'   # attacker
 
-def log(s, col="green"):
-    print(T.colored(s, col))
+def log(s, col="green"): print(T.colored(s, col))
 
+class Router(Topo):
+    pass
 
-class Router(Switch):
-    """The Router object provides a container (namespace) for individual routing entries"""
-
-    ID = 0
-    def __init__(self, name, **kwargs):
-        kwargs['inNamespace'] = True
-        Switch.__init__(self, name, **kwargs)
-        Router.ID += 1
-        self.switch_id = Router.ID
-
-    @staticmethod
-    def setup():
-        return
-
-    def start(self, controllers):
-        pass
-
-    def stop(self):
-        self.deleteIntfs()
-
-    def log(self, s, col="magenta"):
-        print(T.colored(s, col))
-
-
-class SimpleTopo(Topo):
-    """The default topology is a simple straight-line topology between AS1 -- AS2 -- AS3.  The rogue AS (AS4) connects to AS1 directly."""
-
+class Fig2Topo(Topo):
     def __init__(self):
-        super(SimpleTopo, self ).__init__()
+        super(Fig2Topo,self).__init__()
+        def add_as(n):
+            r = f'R{n}'
+            self.addSwitch(r)
+            for h in (1,2):
+                hn = f'h{n}-{h}'
+                self.addHost(hn)
+                self.addLink(r, hn)
+        for n in (1,2,3,4,5,6): add_as(n)
 
-        hosts = []
-
-        def create_router_and_hosts(as_num: int):
-            router = f'R{as_num}'
-            self.addSwitch(router)
-            for host_num in [1, 2]:
-                host = self.addNode(f'h{as_num}-{host_num}')
-                hosts.append(host)
-                self.addLink(router, host)
-
-        #
-        # create the ASs
-        #
-        # Each AS has one routers and two hosts
-        # - AS1 has a single router (R1) and two hosts (h1-1, h1-2)
-        # - AS2 has a single router (R2) and two hosts (h2-1, h2-2)
-        # - AS3 has a single router (R3) and two hosts (h3-1, h3-2)
-        # - AS4 has a single router (R4) and two hosts (h4-1, h4-2)
-        create_router_and_hosts(1)
-        create_router_and_hosts(2)
-        create_router_and_hosts(3)
-        create_router_and_hosts(4)
-
-        # link the ASs - the demo scenario is a straight line with the attacker directly attached to AS1/R1
-        self.addLink('R1', 'R2')
-        self.addLink('R2', 'R3')
-        self.addLink('R1', 'R4')
-
+        # ---- Inter-AS links (order matters for eth index mapping) ----
+        # L12
+        self.addLink('R1','R2')
+        # L23
+        self.addLink('R2','R3')
+        # L35
+        self.addLink('R3','R5')
+        # L25
+        self.addLink('R2','R5')
+        # L24
+        self.addLink('R2','R4')
+        # L34
+        self.addLink('R3','R4')
+        # L45
+        self.addLink('R4','R5')
+        # L36
+        self.addLink('R3','R6')
+        # L56
+        self.addLink('R5','R6')
 
 def parse_hostname(hostname):
-    as_num, host_num = hostname.replace('h', '').split('-')
+    as_num, host_num = hostname.replace('h','').split('-')
     return int(as_num), int(host_num)
 
 def get_ip(hostname):
-    as_num, host_num = parse_hostname(hostname)
-    # AS4 is posing as AS3
-    if as_num == 4:
-        as_num = 3
-    host_ip = f'{10+as_num}.0.{host_num}.1/24'
-    return host_ip
-
+    asn, hostn = parse_hostname(hostname)
+    return f'{10+asn}.0.{hostn}.1/24'
 
 def get_gateway(hostname):
-    as_num, host_num = parse_hostname(hostname)
-    # AS4 is posing as AS3
-    if as_num == 4:
-        as_num = 3
-    gateway_ip = f'{10+as_num}.0.{host_num}.254'
-    return gateway_ip
+    asn, hostn = parse_hostname(hostname)
+    return f'{10+asn}.0.{hostn}.254'
 
-
-def start_webserver(net, hostname, text="Default web server 2.1.1"):
+def start_webserver(net, hostname, text):
     host = net.getNodeByName(hostname)
     return host.popen(f"python webserver.py --text '{text}'", shell=True)
-
 
 def main():
     os.system("rm -f /tmp/R*.log /tmp/R*.pid logs/*")
     os.system("mn -c >/dev/null 2>&1")
-    os.system("pkill -9 bgpd > /dev/null 2>&1")
-    os.system("pkill -9 zebra > /dev/null 2>&1")
-    os.system('pkill -9 -f webserver.py')
+    os.system("pkill -9 bgpd >/dev/null 2>&1")
+    os.system("pkill -9 zebra >/dev/null 2>&1")
+    os.system("pkill -9 -f webserver.py >/dev/null 2>&1")
 
-    net = Mininet(topo=SimpleTopo(), switch=Router)
+    net = Mininet(topo=Fig2Topo())
     net.start()
-    for router in net.switches:
-        router.cmd("sysctl -w net.ipv4.ip_forward=1")
-        router.waitOutput()
 
-    log(f"Waiting {args.sleep} seconds for sysctl changes to take effect...")
-    sleep(args.sleep)
+    # enable IP forwarding and start FRR daemons per router
+    for sw in net.switches:
+        sw.cmd("sysctl -w net.ipv4.ip_forward=1")
+    log(f"Waiting {args.sleep}s for sysctl...", "yellow"); sleep(args.sleep)
 
-    for router in net.switches:
-        if router.name == ROGUE_AS_NAME and not FLAGS_rogue_as:
+    for r in net.switches:
+        if r.name == ROGUE_AS_NAME and not FLAGS_rogue_as:
             continue
-        router.cmd("ip link set dev lo up ")
-        router.waitOutput()
-        router.cmd("/usr/lib/frr/zebra -f conf/zebra-%s.conf -d -i /tmp/zebra-%s.pid > logs/%s-zebra-stdout 2>&1" % (router.name, router.name, router.name))
-        router.waitOutput()
-        router.cmd("/usr/lib/frr/bgpd -f conf/bgpd-%s.conf -d -i /tmp/bgp-%s.pid > logs/%s-bgpd-stdout 2>&1" % (router.name, router.name, router.name), shell=True)
-        router.waitOutput()
-        log("Starting zebra and bgpd on %s" % router.name)
+        r.cmd("ip link set dev lo up")
+        r.cmd(f"/usr/lib/frr/zebra -f conf/zebra-{r.name}.conf -d -i /tmp/zebra-{r.name}.pid > logs/{r.name}-zebra-stdout 2>&1")
+        r.cmd(f"/usr/lib/frr/bgpd  -f conf/bgpd-{r.name}.conf  -d -i /tmp/bgpd-{r.name}.pid  > logs/{r.name}-bgpd-stdout 2>&1")
+        log(f"Started FRR on {r.name}")
 
-    for host in net.hosts:
-        host.cmd("ifconfig %s-eth0 %s" % (host.name, get_ip(host.name)))
-        host.cmd("route add default gw %s" % (get_gateway(host.name)))
+    # hosts IP & default gw
+    for h in net.hosts:
+        h.cmd(f"ifconfig {h.name}-eth0 {get_ip(h.name)}")
+        h.cmd(f"route add default gw {get_gateway(h.name)}")
 
-    log("Starting web servers", 'yellow')
-    start_webserver(net, 'h3-1', "Default web server 2.1.1")
-    start_webserver(net, 'h4-1', "*** Attacker web server 2.1.1***")
+    # Web servers: True origin (AS1) vs Attacker (AS6)
+    log("Starting web servers", "yellow")
+    start_webserver(net, 'h1-1', "Default web server (AS1)")
+    start_webserver(net, 'h6-1', "*** Attacker web server (AS6) ***")
 
     CLI(net, script=args.scriptfile)
     net.stop()
-    os.system("pkill -9 bgpd")
-    os.system("pkill -9 zebra")
-    os.system('pkill -9 -f webserver.py')
+    os.system("pkill -9 bgpd"); os.system("pkill -9 zebra")
+    os.system("pkill -9 -f webserver.py")
 
-
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
