@@ -82,32 +82,25 @@ def check_r6_status() -> None:
     rc, out, err = run_node("R6", "ps aux | egrep '[z]ebra|[b]gpd' || true")
     print_block("R6: FRR 프로세스", out or err)
 
+
 def bgp_summary(nodes: List[str]) -> None:
+    """
+    각 노드에서 'vtysh -c "show ip bgp summary"' 를 실행해서 출력 획득.
+    vtysh가 없거나 실패하면 /tmp/<NODE>-bgpd.log 를 tail 해서 폴백합니다.
+    """
     for n in nodes:
         title = f"{n}: show ip bgp summary"
-        # 안전한 한줄 Python TCP 클라이언트로 VTY(포트2605)에 접속해 명령 전송
-        py_cmd = (
-            "python3 -c "
-            "\"import socket,sys;"
-            "s=socket.socket();"
-            "s.connect(('127.0.0.1',2605));"
-            "s.send(b'show ip bgp summary\\nexit\\n');"
-            "data=b'';"
-            "s.settimeout(1.0);"
-            "try:"
-            "    while True: data += s.recv(4096)"
-            "except: pass;"
-            "sys.stdout.write(data.decode(errors='ignore'));"
-            "s.close()\""
-        )
-        rc, out, err = run_node(n, py_cmd)
+        # vtysh -c "show ip bgp summary" 로 직접 실행 (인용이 단순하므로 안전)
+        rc, out, err = run_node(n, 'vtysh -c "show ip bgp summary" || true')
         if out.strip():
             print_block(title, out)
         else:
             # 실패 시 로그로 폴백
             rc2, out2, err2 = run_node(n, f"tail -n 40 /tmp/{n}-bgpd.log || true")
-            msg = out2 if out2 else (err or "(vty 출력/로그 모두 없음)")
+            msg = out2 if out2 else (err or "(vtysh 출력/로그 모두 없음)")
             print_block(f"{title} (fallback: tail bgpd.log)", msg)
+
+
 
 def http_probe(node: str, target_ip: str = "11.0.1.1", timeout: int = 4) -> str:
     cmd = f"curl -s --max-time {timeout} http://{target_ip} || true"
