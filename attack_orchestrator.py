@@ -99,8 +99,8 @@ def _run_vtysh_or_netcat(node: str, vty_cmd: str) -> Tuple[int, str, str]:
     # printf로 명령 전달하고 연결 닫기
     # try -N first (OpenBSD netcat), fall back to -w1 -q 0 (GNU busybox style)
     nc_cmds = [
-        f"printf {shlex.quote(vty_cmd + '\\nexit\\n')} | nc -w1 -N 127.0.0.1 2605 || true",
-        f"printf {shlex.quote(vty_cmd + '\\nexit\\n')} | nc -w1 -q 0 127.0.0.1 2605 || true"
+        "printf " + shlex.quote(vty_cmd + "\nexit\n") + " | nc -w1 -N 127.0.0.1 2605 || true",
+        "printf " + shlex.quote(vty_cmd + "\nexit\n") + " | nc -w1 -q 0 127.0.0.1 2605 || true"
     ]
     for nc in nc_cmds:
         rc2, out2, err2 = run_node(node, nc)
