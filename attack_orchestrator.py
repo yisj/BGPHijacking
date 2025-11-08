@@ -85,21 +85,26 @@ def check_r6_status() -> None:
 
 def bgp_summary(nodes: List[str]) -> None:
     """
-    각 노드에서 'vtysh -c "show ip bgp summary"' 를 실행해서 출력 획득.
-    vtysh가 없거나 실패하면 /tmp/<NODE>-bgpd.log 를 tail 해서 폴백합니다.
+    각 노드의 bgpd VTY(127.0.0.1:2605)에 직접 붙어서 'show ip bgp summary'를 조회.
+    vtysh 교차-첨부 문제를 피하기 위해 nc를 사용하고, 실패 시 로그로 폴백합니다.
     """
     for n in nodes:
         title = f"{n}: show ip bgp summary"
-        # vtysh -c "show ip bgp summary" 로 직접 실행 (인용이 단순하므로 안전)
-        rc, out, err = run_node(n, 'vtysh -c "show ip bgp summary" || true')
+        # BusyBox nc 또는 netcat이 있을 때:
+        cmd = "printf 'show ip bgp summary\\nexit\\n' | nc -w1 127.0.0.1 2605 || true"
+        rc, out, err = run_node(n, cmd)
         if out.strip():
             print_block(title, out)
         else:
-            # 실패 시 로그로 폴백
-            rc2, out2, err2 = run_node(n, f"tail -n 40 /tmp/{n}-bgpd.log || true")
-            msg = out2 if out2 else (err or "(vtysh 출력/로그 모두 없음)")
-            print_block(f"{title} (fallback: tail bgpd.log)", msg)
-
+            # telnet 폴백(환경에 따라 필요)
+            rc2, out2, err2 = run_node(n, "printf 'show ip bgp summary\\nexit\\n' | telnet 127.0.0.1 2605 2>/dev/null || true")
+            if out2.strip():
+                print_block(title, out2)
+            else:
+                # 로그 폴백
+                rc3, out3, err3 = run_node(n, f"tail -n 40 /tmp/{n}-bgpd.log || true")
+                msg = out3 if out3 else (err or err2 or "(vty 출력/로그 모두 없음)")
+                print_block(f"{title} (fallback: tail bgpd.log)", msg)
 
 
 def http_probe(node: str, target_ip: str = "11.0.1.1", timeout: int = 4) -> str:
