@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-# 안전한 mininet 노드 명령 실행기
+# robust run.py for Mininet nodes (PID mapping + shell-safe exec)
+
 import os
 import sys
 import re
@@ -12,28 +13,36 @@ parser.add_argument('--list', action="store_true", default=False, help="List all
 parser.add_argument('--cmd', nargs="+", default=['ifconfig'], help="Command to run inside node.")
 FLAGS = parser.parse_args()
 
-# '... mininet:<NAME> ...' 형태를 robust하게 파싱
-MINI_PAT = re.compile(r'mininet:([A-Za-z0-9\-]+)')
+# match "... mininet:<NAME> ..." in the full argv of node shell
+MINI_PAT = re.compile(r'\bmininet:([A-Za-z0-9\-]+)\b')
 
 def list_nodes(do_print=False):
-    # ps 출력에서 mininet:<name> 를 모두 수집
+    """Return {name: pid} by scanning full command lines."""
     ret = {}
     try:
+        # -eww : do not truncate; show full width
         proc = subprocess.run(
-            ["ps", "-eo", "pid,cmd", "--no-headers"],
+            ["ps", "-eww", "-o", "pid=", "-o", "args="],
             capture_output=True, text=True, check=True
         )
-    except subprocess.CalledProcessError as e:
+    except subprocess.CalledProcessError:
         print("ps failed", file=sys.stderr)
         return ret
 
     for line in proc.stdout.splitlines():
-        m = MINI_PAT.search(line)
+        line = line.strip()
+        if not line:
+            continue
+        # split first field PID from the rest
+        try:
+            pid, args = line.split(None, 1)
+        except ValueError:
+            continue
+        m = MINI_PAT.search(args)
         if not m:
             continue
         name = m.group(1)
-        pid  = line.strip().split()[0]
-        # 같은 이름이 여러 번 나오면 가장 마지막(최근)을 사용
+        # last one wins (most recent)
         ret[name] = pid
 
     if do_print:
@@ -56,13 +65,16 @@ def main():
         print(f"node `{FLAGS.node}` not found", file=sys.stderr)
         sys.exit(1)
 
+    # Join the command exactly as typed; we will pass it to /bin/sh -lc
     cmd = ' '.join(FLAGS.cmd)
-    # 실행 전 sanity: 해당 네임스페이스에서 hostname을 찍어 일치 여부를 stderr 경고
+
+    # Sanity check: hostname inside that namespace
     sanity = subprocess.run(["mnexec", "-a", pid, "hostname"], capture_output=True, text=True)
     if sanity.stdout.strip() and sanity.stdout.strip() != FLAGS.node:
         print(f"[경고] 요청 노드 '{FLAGS.node}' vs 실제 hostname '{sanity.stdout.strip()}'", file=sys.stderr)
 
-    os.execvp("mnexec", ["mnexec", "-a", pid] + cmd.split())
+    # Very important: run through a shell to keep pipes/quotes/redirs intact
+    os.execvp("mnexec", ["mnexec", "-a", pid, "/bin/sh", "-lc", cmd])
 
 if __name__ == '__main__':
     main()
