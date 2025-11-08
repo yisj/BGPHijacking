@@ -85,13 +85,17 @@ def check_r6_status() -> None:
 def bgp_summary(nodes: List[str]) -> None:
     for n in nodes:
         title = f"{n}: show ip bgp summary"
-        rc, out, err = run_node(n, "vtysh -c 'show ip bgp summary' || true")
-        if out:
+        # vtysh 대신 TCP VTY(2605)로 질의: telnet localhost bgpd
+        cmd = r"sh -lc \"(sleep 0.1; echo 'show ip bgp summary'; sleep 0.1; echo 'exit') | telnet localhost bgpd 2>/dev/null | sed -n '1,200p'\""
+        rc, out, err = run_node(n, cmd)
+        if out.strip():
             print_block(title, out)
         else:
+            # 실패 시 로그로 폴백
             rc2, out2, err2 = run_node(n, f"tail -n 40 /tmp/{n}-bgpd.log || true")
-            msg = out2 if out2 else err or "(vtysh 출력이 없어 로그로 대체했으나 로그도 없음)"
+            msg = out2 if out2 else err or "(vty 출력/로그 모두 없음)"
             print_block(f"{title} (fallback: tail bgpd.log)", msg)
+
 
 def http_probe(node: str, target_ip: str = "11.0.1.1", timeout: int = 4) -> str:
     cmd = f"curl -s --max-time {timeout} http://{target_ip} || true"
