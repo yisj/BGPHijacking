@@ -100,14 +100,21 @@ def parse_hostname(hostname):
     as_num, host_num = hostname.replace('h', '').split('-')
     return int(as_num), int(host_num)
 
+
 def get_ip(hostname):
     as_num, host_num = parse_hostname(hostname)
-    # Hosts in ASX live in (10+X).0.host/24, e.g., AS1 -> 11.0.x.1/24
+    # AS6 is posing as AS1 (to answer 11.0.0.0/8 traffic)
+    if as_num == 6:
+        as_num = 1
     return f'{10+as_num}.0.{host_num}.1/24'
 
 def get_gateway(hostname):
     as_num, host_num = parse_hostname(hostname)
+    # AS6 is posing as AS1
+    if as_num == 6:
+        as_num = 1
     return f'{10+as_num}.0.{host_num}.254'
+
 
 def start_webserver(net, hostname, text="Default web server"):
     host = net.getNodeByName(hostname)
