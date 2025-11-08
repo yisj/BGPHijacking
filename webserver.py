@@ -13,7 +13,6 @@ parser.add_argument('--text', default="Default web server")
 FLAGS = parser.parse_args()
 
 class Handler(http.server.SimpleHTTPRequestHandler):
-    # Disable logging DNS lookups
     def address_string(self):
         return str(self.client_address[0])
 
