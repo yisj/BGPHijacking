@@ -85,17 +85,29 @@ def check_r6_status() -> None:
 def bgp_summary(nodes: List[str]) -> None:
     for n in nodes:
         title = f"{n}: show ip bgp summary"
-        # vtysh 대신 TCP VTY(2605)로 질의: telnet localhost bgpd
-        cmd = r"sh -lc \"(sleep 0.1; echo 'show ip bgp summary'; sleep 0.1; echo 'exit') | telnet localhost bgpd 2>/dev/null | sed -n '1,200p'\""
-        rc, out, err = run_node(n, cmd)
+        # 안전한 한줄 Python TCP 클라이언트로 VTY(포트2605)에 접속해 명령 전송
+        py_cmd = (
+            "python3 -c "
+            "\"import socket,sys;"
+            "s=socket.socket();"
+            "s.connect(('127.0.0.1',2605));"
+            "s.send(b'show ip bgp summary\\nexit\\n');"
+            "data=b'';"
+            "s.settimeout(1.0);"
+            "try:"
+            "    while True: data += s.recv(4096)"
+            "except: pass;"
+            "sys.stdout.write(data.decode(errors='ignore'));"
+            "s.close()\""
+        )
+        rc, out, err = run_node(n, py_cmd)
         if out.strip():
             print_block(title, out)
         else:
             # 실패 시 로그로 폴백
             rc2, out2, err2 = run_node(n, f"tail -n 40 /tmp/{n}-bgpd.log || true")
-            msg = out2 if out2 else err or "(vty 출력/로그 모두 없음)"
+            msg = out2 if out2 else (err or "(vty 출력/로그 모두 없음)")
             print_block(f"{title} (fallback: tail bgpd.log)", msg)
-
 
 def http_probe(node: str, target_ip: str = "11.0.1.1", timeout: int = 4) -> str:
     cmd = f"curl -s --max-time {timeout} http://{target_ip} || true"
