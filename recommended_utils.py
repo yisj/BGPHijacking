@@ -16,9 +16,13 @@ def restore_tty(saved):
     subprocess.run("stty sane >/dev/null 2>&1 || true", shell=True)
     subprocess.run("tput cnorm >/dev/null 2>&1 || true", shell=True)
 
-def run_cmd(cmd, capture=True, passthrough=False, check=True):
-    """기본은 stdin=DEVNULL로 안전 실행. passthrough=True면 interactive 실행."""
+def run_cmd(cmd, capture=True, passthrough=False, check=False):
+    """
+    기본은 check=False 로 예외를 내지 않습니다.
+    비대화형 안전 실행을 위해 stdin=DEVNULL.
+    """
     if passthrough:
+        # 상호작용 필요한 경우에만 패스스루
         return subprocess.call(cmd, shell=True)
     proc = subprocess.run(
         cmd,
